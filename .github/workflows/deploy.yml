@@ -1,0 +1,123 @@
+name: Deploy DVWA
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy to DVWA Server
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Display deployment info
+        run: |
+          Write-Host "========================================" -ForegroundColor Cyan
+          Write-Host "  DVWA Deployment Started" -ForegroundColor Cyan
+          Write-Host "========================================" -ForegroundColor Cyan
+          Write-Host "Server: $env:COMPUTERNAME"
+          Write-Host "Triggered by: $env:GITHUB_ACTOR"
+          Write-Host "Branch: $env:GITHUB_REF_NAME"
+
+      - name: Check XAMPP Services
+        run: |
+          $apache = Get-Process httpd -ErrorAction SilentlyContinue
+          if ($apache) {
+            Write-Host "[OK] Apache is running" -ForegroundColor Green
+          } else {
+            Write-Host "[WARNING] Apache is not running" -ForegroundColor Yellow
+          }
+
+          $mysql = Get-Process mysqld -ErrorAction SilentlyContinue
+          if ($mysql) {
+            Write-Host "[OK] MySQL is running" -ForegroundColor Green
+          } else {
+            Write-Host "[WARNING] MySQL is not running" -ForegroundColor Yellow
+          }
+
+      - name: Sync DVWA files
+        run: |
+          $dvwaPath = "C:\xampp\htdocs\DVWA"
+          $configFile = "$dvwaPath\config\config.inc.php"
+          $configBackup = "$env:TEMP\dvwa_config_backup.php"
+
+          if (Test-Path $configFile) {
+            Write-Host "Backing up DVWA config..."
+            Copy-Item $configFile $configBackup -Force
+          }
+
+          Write-Host "Syncing DVWA files..."
+          $source = $env:GITHUB_WORKSPACE
+
+          Get-ChildItem -Path $source -Exclude '.git','.github' | ForEach-Object {
+            $dest = Join-Path $dvwaPath $_.Name
+            if ($_.PSIsContainer) {
+              if ($_.Name -ne 'config') {
+                Copy-Item $_.FullName $dest -Recurse -Force -ErrorAction SilentlyContinue
+              }
+            } else {
+              Copy-Item $_.FullName $dest -Force -ErrorAction SilentlyContinue
+            }
+          }
+
+          if (Test-Path $configBackup) {
+            Write-Host "Restoring DVWA config..."
+            Copy-Item $configBackup $configFile -Force
+            Remove-Item $configBackup -Force
+          }
+
+          Write-Host "[OK] Files synced successfully" -ForegroundColor Green
+
+      - name: Restart Apache
+        run: |
+          Write-Host "Restarting Apache..."
+          Stop-Process -Name httpd -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
+          Start-Process "C:\xampp\apache\bin\httpd.exe" -WindowStyle Hidden
+          Start-Sleep -Seconds 3
+
+          if (Get-Process httpd -ErrorAction SilentlyContinue) {
+            Write-Host "[OK] Apache restarted" -ForegroundColor Green
+          } else {
+            Write-Error "Apache failed to start"
+            exit 1
+          }
+
+      - name: Health Check
+        run: |
+          $maxRetries = 5
+          $success = $false
+
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              $response = Invoke-WebRequest -Uri "http://localhost:8080/DVWA/" -UseBasicParsing -TimeoutSec 10
+              if ($response.StatusCode -eq 200) {
+                Write-Host "[OK] DVWA is responding" -ForegroundColor Green
+                $success = $true
+                break
+              }
+            } catch {
+              Write-Host "Retry $i/$maxRetries..."
+              Start-Sleep -Seconds 2
+            }
+          }
+
+          if (-not $success) {
+            Write-Error "Health check failed"
+            exit 1
+          }
+
+      - name: Deployment Summary
+        run: |
+          Write-Host ""
+          Write-Host "========================================" -ForegroundColor Green
+          Write-Host "  Deployment Complete!" -ForegroundColor Green
+          Write-Host "========================================" -ForegroundColor Green
+          Write-Host "URL: http://10.5.1.71:8080/DVWA/"
+          Write-Host "Credentials: admin / password"
